@@ -1,0 +1,221 @@
+
+# 📘 ELECTRIC VEHICLE BATTERY HEALTH PREDICTION & SMART CHARGING RECOMMENDATION
+
+!pip install pandas numpy scikit-learn xgboost shap matplotlib openai fastapi uvicorn joblib kaggle -q
+
+import pandas as pd, numpy as np, matplotlib.pyplot as plt, shap, joblib, json, os
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import mean_absolute_error, mean_squared_error, r2_score
+import xgboost as xgb
+from sklearn.impute import SimpleImputer
+from sklearn.preprocessing import StandardScaler
+from sklearn.pipeline import Pipeline
+
+# ================================
+# ✅ Step 2. Upload or Download Dataset
+# ================================
+# Option 1: Upload manually (recommended)
+from google.colab import files
+print("📂 Please upload your EV battery dataset CSV (from Kaggle).")
+uploaded = files.upload()
+
+for fn in uploaded.keys():
+    dataset_path = fn
+print("✅ Loaded:", dataset_path)
+
+# ================================
+# ✅ Step 3. Load & Preprocess Data
+# ================================
+
+df = pd.read_csv(dataset_path)
+print("Initial shape:", df.shape)
+df.head()
+
+# ---- Normalize column names ----
+df.columns = [c.strip().lower().replace(" ", "_") for c in df.columns]
+
+# ---- Basic numeric casting ----
+num_cols = ['soc','soh','cycle_count','temperature','voltage','current',
+            'energy_kwh','charging_duration_minutes','charging_power_kw']
+for c in num_cols:
+    if c in df.columns:
+        df[c] = pd.to_numeric(df[c], errors='coerce')
+
+# ---- Derive charging type ----
+def derive_charging_type(row):
+    if 'charging_power_kw' in row and not pd.isna(row['charging_power_kw']):
+        return 'fast' if row['charging_power_kw'] >= 22 else 'slow'
+    if 'energy_kwh' in row and 'charging_duration_minutes' in row and row['charging_duration_minutes'] not in (0,None):
+        avg_power = row['energy_kwh'] / (row['charging_duration_minutes']/60)
+        return 'fast' if avg_power >= 22 else 'slow'
+    return 'unknown'
+
+df['charging_type'] = df.apply(derive_charging_type, axis=1)
+df['charging_type_fast'] = (df['charging_type']=='fast').astype(int)
+df['charging_type_slow'] = (df['charging_type']=='slow').astype(int)
+df['charging_type_unknown'] = (df['charging_type']=='unknown').astype(int)
+
+# ---- Energy per minute ----
+if 'energy_kwh' in df.columns and 'charging_duration_minutes' in df.columns:
+    df['energy_per_min'] = df['energy_kwh'] / (df['charging_duration_minutes'].replace({0:np.nan}))
+
+# ---- Temperature derived flags ----
+if 'temperature' in df.columns:
+    df['temp_above_30'] = (df['temperature']>30).astype(int)
+    df['temp_below_0'] = (df['temperature']<0).astype(int)
+
+# ---- Handle missing SOH ----
+if 'capacity_ah' in df.columns and 'nominal_capacity_ah' in df.columns:
+    df['soh'] = (df['capacity_ah']/df['nominal_capacity_ah'])*100
+
+df = df.dropna(subset=['soh']).reset_index(drop=True)
+print("After preprocessing:", df.shape)
+
+# ================================
+# ✅ Step 4. Feature Selection
+# ================================
+features = [c for c in [
+    'soc','cycle_count','charging_duration_minutes','energy_kwh','energy_per_min',
+    'temperature','voltage','current',
+    'charging_type_fast','charging_type_slow','charging_type_unknown',
+    'temp_above_30','temp_below_0'
+] if c in df.columns]
+
+X = df[features]
+y = df['soh']
+
+print("Using features:", features)
+
+# ================================
+# ✅ Step 5. Split & Train Model
+# ================================
+X_train,X_temp,y_train,y_temp = train_test_split(X,y,test_size=0.3,random_state=42)
+X_val,X_test,y_val,y_test = train_test_split(X_temp,y_temp,test_size=0.5,random_state=42)
+
+model = xgb.XGBRegressor(
+    objective='reg:squarederror',
+    eval_metric='rmse',
+    learning_rate=0.05,
+    max_depth=6,
+    n_estimators=800,
+    subsample=0.8,
+    colsample_bytree=0.8,
+    seed=42
+)
+
+model.fit(X_train, y_train, eval_set=[(X_val,y_val)], early_stopping_rounds=40, verbose=False)
+
+# ================================
+# ✅ Step 6. Evaluate
+# ================================
+preds = model.predict(X_test)
+mae = mean_absolute_error(y_test, preds)
+rmse = mean_squared_error(y_test, preds, squared=False)
+r2 = r2_score(y_test, preds)
+
+print(f"✅ MAE: {mae:.3f}, RMSE: {rmse:.3f}, R2: {r2:.3f}")
+
+plt.figure(figsize=(6,6))
+plt.scatter(y_test, preds, alpha=0.5)
+plt.xlabel("Actual SOH%"); plt.ylabel("Predicted SOH%")
+plt.title("Predicted vs Actual Battery Health (SOH%)")
+plt.grid(True); plt.show()
+
+# ================================
+# ✅ Step 7. Explainability (SHAP)
+# ================================
+explainer = shap.TreeExplainer(model)
+shap_values = explainer.shap_values(X.sample(200, random_state=42))
+shap.summary_plot(shap_values, X.sample(200, random_state=42))
+
+# ================================
+# ✅ Step 8. Save Model
+# ================================
+os.makedirs("saved_models", exist_ok=True)
+joblib.dump(model, "saved_models/xgb_soh_model.pkl")
+print("✅ Model saved to saved_models/xgb_soh_model.pkl")
+
+# ================================
+# ✅ Step 9. Smart Charging Recommendation (GenAI)
+# ================================
+# Optional: set your OpenAI key (skip if you want rule-based)
+os.environ["OPENAI_API_KEY"] = ""  # 🔑 put your key here
+
+try:
+    import openai
+    openai.api_key = os.getenv("OPENAI_API_KEY")
+    OPENAI = True if openai.api_key else False
+except:
+    OPENAI = False
+
+def smart_recommendation(soc, soh, temperature, charging_type="slow", prefs={"need_quick_charge":False}):
+    """Return AI or rule-based charging recommendation."""
+    if OPENAI:
+        prompt = f"""
+        You are an EV battery health expert.
+        SOC: {soc}%, SOH: {soh}%, Temperature: {temperature}°C, Charging: {charging_type}, Prefs: {prefs}.
+        Give:
+        1. Risk assessment (1 line)
+        2. Smart charging recommendation
+        3. 3 short tips to extend battery life.
+        """
+        try:
+            response = openai.Completion.create(
+                engine="text-davinci-003",
+                prompt=prompt,
+                max_tokens=200,
+                temperature=0.3
+            )
+            return response['choices'][0]['text'].strip()
+        except Exception as e:
+            print("⚠️ OpenAI call failed:", e)
+
+    # ---- fallback rule-based ----
+    tips=[]
+    if temperature>35: tips.append("Avoid charging at very high ambient temperature.")
+    if temperature<0: tips.append("Warm battery before charging in cold weather.")
+    if soh<80: tips.append("Battery health <80%; avoid frequent fast charges.")
+    tips.append("Keep daily charge between 20–80%.")
+    rec = "Use slow AC charging overnight for better battery longevity."
+    if prefs.get("need_quick_charge"): rec = "Use fast charging only when necessary and limit to 80% SOC."
+    risk = f"SOH {soh:.1f}% — monitor if below 80%."
+    return {"risk":risk,"recommendation":rec,"tips":tips}
+
+# Example
+example = smart_recommendation(soc=50, soh=float(preds.mean()), temperature=30, charging_type="fast", prefs={"need_quick_charge":True})
+print("🔋 Smart Charging Recommendation:\n", example)
+
+# ================================
+# ✅ Step 10. Interactive Prediction
+# ================================
+def predict_soh(input_dict):
+    sample = pd.DataFrame([input_dict])
+    for c in features:
+        if c not in sample.columns:
+            sample[c] = 0
+    pred = model.predict(sample[features])[0]
+    return pred
+
+example_input = {
+    "soc": 60,
+    "cycle_count": 300,
+    "charging_duration_minutes": 40,
+    "energy_kwh": 12,
+    "temperature": 28,
+    "voltage": 400,
+    "current": 50,
+    "charging_type_fast": 1,
+    "charging_type_slow": 0,
+    "charging_type_unknown": 0,
+    "temp_above_30": 0,
+    "temp_below_0": 0,
+    "energy_per_min": 0.3
+}
+
+pred_soh = predict_soh(example_input)
+print(f"🔮 Predicted Battery SOH: {pred_soh:.2f}%")
+
+# ================================
+# ✅ All done!
+# ================================
+print("\n🎯 EV Battery Health Prediction + Smart Charging Assistant ready to use!")
