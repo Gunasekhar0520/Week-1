@@ -1,0 +1,136 @@
+# ============================================================================
+# 🚗 EV BATTERY HEALTH PREDICTION + SMART CHARGING CHATBOT USING YOUR DATASET
+# ============================================================================
+
+# 1. INSTALL LIBRARIES
+!pip install scikit-learn pandas numpy matplotlib
+
+import pandas as pd
+import numpy as np
+from sklearn.model_selection import train_test_split
+from sklearn.preprocessing import LabelEncoder
+from sklearn.ensemble import RandomForestRegressor
+from sklearn.metrics import mean_absolute_error
+
+# -----------------------------
+# 2. LOAD YOUR UPLOADED DATASET
+# -----------------------------
+from google.colab import files
+uploaded = files.upload()
+
+df = pd.read_csv(list(uploaded.keys())[0])
+print("Dataset Loaded Successfully!")
+df.head()
+
+# -----------------------------
+# 3. PREPROCESSING
+# -----------------------------
+df = df.dropna()
+
+# Encode categorical columns
+label_cols = ["Charging Mode", "Battery Type", "EV Model"]
+encoders = {}
+
+for col in label_cols:
+    enc = LabelEncoder()
+    df[col] = enc.fit_transform(df[col])
+    encoders[col] = enc
+
+# -----------------------------
+# 4. SELECT FEATURES + TARGET
+# -----------------------------
+features = [
+    "SOC (%)",
+    "Voltage (V)",
+    "Current (A)",
+    "Battery Temp (°C)",
+    "Ambient Temp (°C)",
+    "Charging Duration (min)",
+    "Efficiency (%)",
+    "Charging Mode",
+    "Battery Type",
+    "Charging Cycles"
+]
+
+target = "Degradation Rate (%)"
+
+X = df[features]
+y = df[target]
+
+# -----------------------------
+# 5. TRAIN-TEST SPLIT
+# -----------------------------
+X_train, X_test, y_train, y_test = train_test_split(
+    X, y, test_size=0.2, random_state=42
+)
+
+# -----------------------------
+# 6. MACHINE LEARNING MODEL
+# -----------------------------
+model = RandomForestRegressor()
+model.fit(X_train, y_train)
+
+preds = model.predict(X_test)
+print("\nModel MAE:", mean_absolute_error(y_test, preds))
+
+# -----------------------------
+# 7. SMART CHARGING RECOMMENDATION ENGINE
+# -----------------------------
+def smart_charging_tips(soc, temp, mode):
+    tips = []
+
+    if soc < 20:
+        tips.append("⚠ Avoid fast charging below 20% SOC to prevent lithium plating.")
+
+    if soc > 80:
+        tips.append("⚠ Charging above 80% repeatedly reduces battery lifespan.")
+
+    if temp > 45:
+        tips.append("🔥 Battery temperature is high — allow cooling before charging.")
+
+    if mode.lower() == "fast":
+        tips.append("⚡ Fast charging increases degradation, use slow charging when possible.")
+
+    if not tips:
+        return "Everything looks good! Normal charging recommended."
+
+    return " | ".join(tips)
+
+# -----------------------------
+# 8. GENAI-STYLE SIMPLE CHATBOT
+# -----------------------------
+def chatbot(user_msg):
+    msg = user_msg.lower()
+
+    # Predict degradation rate
+    if "predict degradation" in msg:
+        test_sample = X.sample(1).iloc[0]
+        pred = model.predict([test_sample])[0]
+        return f"🔋 Predicted Battery Degradation Rate: **{pred:.2f}%**"
+
+    # Charging recommendation
+    if "recommend" in msg or "charging" in msg:
+        return smart_charging_tips(35, 30, "fast")
+
+    # SOC / battery life question
+    if "improve battery" in msg or "increase life" in msg:
+        return (
+            "To improve EV battery life:\n"
+            "- Keep SOC between 20% and 80%\n"
+            "- Avoid frequent fast charging\n"
+            "- Maintain optimal temperature\n"
+            "- Avoid high-speed harsh acceleration"
+        )
+
+    # General greeting
+    if "hello" in msg:
+        return "Hello! I’m your EV Battery Assistant. Ask me anything 😀"
+
+    return "I didn’t understand that. Try: 'predict degradation', 'charging tips', or 'improve battery life'."
+
+# -----------------------------
+# 9. TEST CHATBOT
+# -----------------------------
+print(chatbot("predict degradation"))
+print(chatbot("give charging recommendation"))
+print(chatbot("hello"))
